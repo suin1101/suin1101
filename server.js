@@ -1,3 +1,4 @@
+const { createHash, timingSafeEqual } = require("node:crypto");
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -6,6 +7,11 @@ const ROOT = __dirname;
 loadEnv(path.join(ROOT, ".env"));
 
 const PORT = Number(process.env.PORT || 8765);
+const HOST = process.env.HOST || "127.0.0.1";
+const APP_PASSWORD = process.env.PLANT_APP_PASSWORD || "";
+const APP_AUTH = APP_PASSWORD
+  ? hashAuthorization(`Basic ${Buffer.from(`plant:${APP_PASSWORD}`).toString("base64")}`)
+  : null;
 const BASE_URL = (process.env.ANYTHINGLLM_URL || "").replace(/\/+$/, "");
 const API_KEY = process.env.ANYTHINGLLM_API_KEY || "";
 const WORKSPACE_SLUG = process.env.ANYTHINGLLM_WORKSPACE_SLUG || "";
@@ -42,6 +48,19 @@ const server = http.createServer(async (request, response) => {
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("Cache-Control", "no-store");
 
+  if (request.method === "GET" && request.url === "/healthz") {
+    return sendJson(response, 200, { ok: true });
+  }
+
+  if (process.env.RAILWAY_ENVIRONMENT_ID && !APP_AUTH) {
+    return sendJson(response, 503, { error: "학습 페이지의 접속 비밀번호를 설정해 주세요." });
+  }
+
+  if (APP_AUTH && !timingSafeEqual(APP_AUTH, hashAuthorization(request.headers.authorization || ""))) {
+    response.setHeader("WWW-Authenticate", 'Basic realm="Plant Learning", charset="UTF-8"');
+    return sendJson(response, 401, { error: "학습 페이지에 로그인해 주세요." });
+  }
+
   if (request.method === "GET" && request.url === "/") {
     return serveIndex(response);
   }
@@ -56,6 +75,9 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "POST" && request.url === "/api/chat") {
+    if (APP_AUTH && request.headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json") {
+      return sendJson(response, 415, { error: "JSON 형식으로 질문을 보내 주세요." });
+    }
     return chat(request, response);
   }
 
@@ -66,12 +88,16 @@ const server = http.createServer(async (request, response) => {
   sendJson(response, 404, { error: "요청한 경로를 찾을 수 없습니다." });
 });
 
+function hashAuthorization(value) {
+  return createHash("sha256").update(value).digest();
+}
+
 async function checkAnythingLlm(response) {
   const missing = missingSettings();
   if (missing.length) {
     return sendJson(response, 503, {
       connected: false,
-      error: `.env 설정이 필요합니다: ${missing.join(", ")}`,
+      error: `AnythingLLM 연결 설정이 필요합니다: ${missing.join(", ")}`,
     });
   }
 
@@ -100,7 +126,7 @@ async function chat(request, response) {
   const missing = missingSettings();
   if (missing.length) {
     return sendJson(response, 503, {
-      error: `.env 설정이 필요합니다: ${missing.join(", ")}`,
+      error: `AnythingLLM 연결 설정이 필요합니다: ${missing.join(", ")}`,
     });
   }
 
@@ -359,20 +385,18 @@ async function proxyGeneratedFile(request, response) {
   const missing = missingSettings();
   if (missing.length) {
     return sendJson(response, 503, {
-      error: `.env 설정이 필요합니다: ${missing.join(", ")}`,
+      error: `AnythingLLM 연결 설정이 필요합니다: ${missing.join(", ")}`,
     });
   }
 
   let parsed;
+  let storageName;
   try {
     parsed = new URL(request.url, "http://127.0.0.1");
+    storageName = safeStorageName(decodeURIComponent(parsed.pathname.slice("/api/files/".length)));
   } catch {
     return sendJson(response, 400, { error: "잘못된 요청입니다." });
   }
-
-  const storageName = safeStorageName(
-    decodeURIComponent(parsed.pathname.slice("/api/files/".length)),
-  );
   if (!storageName) {
     return sendJson(response, 400, { error: "잘못된 파일 이름입니다." });
   }
@@ -780,6 +804,6 @@ server.on("error", (error) => {
   process.exit(1);
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`식물 관찰 학습: http://127.0.0.1:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`식물 관찰 학습: http://${HOST}:${PORT}`);
 });
